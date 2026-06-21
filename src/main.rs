@@ -2,11 +2,11 @@ use std::sync::Arc;
 
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, EventLoop};
+use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
-
 use wgpu;
+mod client;
 
 pub fn rgbatocolour(r: u8, g: u8, b: u8, a: u8) -> wgpu::Color {
     wgpu::Color {
@@ -220,14 +220,14 @@ impl ApplicationHandler<State> for App {
 }
 
 fn main() {
-    env_logger::init();
-    let event_loop = EventLoop::with_user_event().build().unwrap();
-    event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
-    let mut app = App {
-        window_options: WindowOptions {
-            use_transparent: false,
-        },
-        ..Default::default()
-    };
-    _ = event_loop.run_app(&mut app);
+    client::send_request(client::Req {
+        method: String::from("GET"),
+        requesttarget: String::from("/"),
+        protocol: client::Protocol::HTTP1_1,
+        headers: vec![client::Header {
+            name: String::from("User Agent"),
+            value: String::from("Engine")
+        }],
+        body: None,
+});
 }
