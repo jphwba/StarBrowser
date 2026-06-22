@@ -7,6 +7,7 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 use wgpu;
 mod client;
+use crate::client::Protocol;
 
 pub fn rgbatocolour(r: u8, g: u8, b: u8, a: u8) -> wgpu::Color {
     wgpu::Color {
@@ -220,14 +221,17 @@ impl ApplicationHandler<State> for App {
 }
 
 fn main() {
-    client::send_request(client::Req {
+    let mut client = client::Client::new(Protocol::HTTP1_1,true);
+    client.connect_to("google.com:80".to_string());
+    let res = client.send_request(client::Req {
         method: String::from("GET"),
         requesttarget: String::from("/"),
         protocol: client::Protocol::HTTP1_1,
-        headers: vec![client::Header {
-            name: String::from("User Agent"),
-            value: String::from("Engine")
-        }],
+        headers: vec![client::Header::new (
+            String::from("User Agent"),
+            String::from("Star Browser")
+    )],
         body: None,
 });
+if res.is_some() {println!("{:?}", res.unwrap());}
 }
