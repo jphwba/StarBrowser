@@ -8,6 +8,7 @@ use winit::window::{Window, WindowId};
 use wgpu;
 mod client;
 use crate::client::Protocol;
+use glyphon::{TextArea, Cache, Color, Buffer, Metrics, Resolution, FontSystem, Shaping, SwashCache, TextBounds, TextRenderer, Viewport, Attrs, TextAtlas};
 
 pub fn rgbatocolour(r: u8, g: u8, b: u8, a: u8) -> wgpu::Color {
     wgpu::Color {
@@ -27,6 +28,12 @@ struct State {
     config: wgpu::SurfaceConfiguration,
     issurfaceconfigured: bool,
     window: Arc<Window>,
+    font_system: FontSystem,
+    swash_cache: SwashCache,
+    text_atlas: TextAtlas,
+    text_renderer: TextRenderer,
+    display_text: String,
+    viewport: Viewport,
 }
 
 impl State {
@@ -57,8 +64,53 @@ impl State {
                 label: Some("Render Encoder"),
             });
 
+        if !self.display_text.is_empty() {
+            let scale = 24.0;
+            let mut buffer = Buffer::new(
+                &mut self.font_system,
+                Metrics::new(scale, scale * 1.4),
+            );
+            buffer.set_size(
+                &mut self.font_system,
+                Some(self.config.width as f32),
+                Some(self.config.height as f32),
+            );
+            buffer.set_text(
+                &mut self.font_system,
+                &self.display_text,
+                &Attrs::new(),
+                Shaping::Basic,
+                None,
+            );
+            buffer.shape_until_scroll(&mut self.font_system, true);
+            let text_area = TextArea {
+                buffer: &buffer,
+                left: 10.0,
+                top: 10.0,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: 0,
+                    top: 0,
+                    right: self.config.width as i32,
+                    bottom: self.config.height as i32,
+                },
+                default_color: Color::rgba(0,0,0,255),
+                custom_glyphs: &[],
+            };
+
+            let _ = self.text_renderer.prepare(
+                &self.device,
+                &self.queue,
+                &mut self.font_system,
+                &mut self.text_atlas,
+                &self.viewport,
+                [text_area],
+                &mut self.swash_cache,
+            );
+        }
+
         {
-            let _render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
@@ -74,13 +126,20 @@ impl State {
                 timestamp_writes: None,
                 multiview_mask: None,
             });
+        
+
+            if !self.display_text.is_empty() {
+                let _ = self
+                    .text_renderer
+                    .render(&self.text_atlas,&self.viewport,&mut render_pass);
+            }
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
     }
 
-    pub async fn new(window: Arc<Window>) -> Self {
+    pub async fn new(window: Arc<Window>, display_text: String) -> Self {
         let size = window.inner_size();
 
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
@@ -110,7 +169,7 @@ impl State {
                 required_limits: wgpu::Limits::default(),
                 memory_hints: Default::default(),
                 trace: wgpu::Trace::Off,
-            })
+            },)
             .await
             .unwrap();
 
@@ -133,6 +192,18 @@ impl State {
             desired_maximum_frame_latency: 1,
         };
 
+        let font_system = FontSystem::new();
+        let swash_cache = SwashCache::new();
+        let cache = Cache::new(&device);
+        let mut text_atlas = TextAtlas::new(&device, &queue, &cache, surfaceformat);
+        let text_renderer = TextRenderer::new(
+            &mut text_atlas,
+            &device,
+            wgpu::MultisampleState::default(),
+            None,
+        );
+        let viewport = Viewport::new(&device, &cache);
+
         Self {
             surface,
             window,
@@ -141,6 +212,12 @@ impl State {
             queue,
             config,
             issurfaceconfigured: false,
+            font_system,
+            swash_cache,
+            text_renderer,
+            display_text,
+            text_atlas,
+            viewport,
         }
     }
 
@@ -148,6 +225,8 @@ impl State {
         if !self.issurfaceconfigured {
             self.surface.configure(&self.device, &self.config);
             self.issurfaceconfigured = true;
+            self.viewport
+                .update(&self.queue, Resolution { width: self.config.width, height: self.config.height });
         }
     }
 
@@ -169,6 +248,7 @@ struct WindowOptions {
 struct App {
     window_options: WindowOptions,
     state: Option<State>,
+    display_text: String,
 }
 
 impl ApplicationHandler<State> for App {
@@ -181,7 +261,8 @@ impl ApplicationHandler<State> for App {
         }
 
         let window = Arc::new(event_loop.create_window(windowattrib).unwrap());
-        self.state = Some(pollster::block_on(State::new(window)));
+        let text = std::mem::take(&mut self.display_text);
+        self.state = Some(pollster::block_on(State::new(window, text)));
     }
 
     fn window_event(
@@ -221,17 +302,43 @@ impl ApplicationHandler<State> for App {
 }
 
 fn main() {
-    let mut client = client::Client::new(Protocol::HTTP1_1,true);
-    client.connect_to("google.com:80".to_string());
-    let res = client.send_request(client::Req {
-        method: String::from("GET"),
-        requesttarget: String::from("/"),
-        protocol: client::Protocol::HTTP1_1,
-        headers: vec![client::Header::new (
-            String::from("User Agent"),
-            String::from("Star Browser")
-    )],
-        body: None,
-});
-if res.is_some() {println!("{:?}", res.unwrap());}
+    let display_text = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> String {
+        let mut client = client::Client::new(Protocol::HTTP1_1, true);
+        client.connect_to("127.0.0.1:8000".to_string());
+        let res = client.send_request(client::Req {
+            method: String::from("GET"),
+            requesttarget: String::from("/"),
+            protocol: client::Protocol::HTTP1_1,
+        headers: vec![
+            client::Header::new(
+                String::from("User Agent"),
+                String::from("Star Browser"),
+            ),
+            client::Header::new(
+                String::from("Connection"),
+                String::from("close"),
+            ),
+        ],
+            body: None,
+        });
+        match res {
+            Some(response) => {
+                let status = response.status_code.unwrap_or(0);
+                format!("Status: {}", status)
+            }
+            None => "No response".to_string(),
+        }
+    }))
+    .unwrap_or_else(|_| "Request error".to_string());
+
+    let mut app = App {
+        display_text,
+        ..Default::default()
+    };
+
+    let event_loop = winit::event_loop::EventLoop::with_user_event()
+        .build()
+        .unwrap();
+    event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
+    _ = event_loop.run_app(&mut app);
 }

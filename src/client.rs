@@ -1,5 +1,6 @@
 use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::net::{TcpStream, ToSocketAddrs};
+use std::time::Duration;
 use std::fmt;
 pub const MINCHUNKLEN: usize = 8;
 pub const CHUNKLEN: usize = 512;
@@ -37,8 +38,14 @@ pub enum Protocol {
 }
 
 impl Protocol {
-    pub fn connect(&self, addr: String) -> Option<TcpStream> { match self {
-        Protocol::HTTP0_9 | Protocol::HTTP1_0 | Protocol::HTTP1_1 => { TcpStream::connect(addr).ok()} _ => None,
+    pub fn connect(&self, addr: &str) -> Option<TcpStream> { match self {
+        Protocol::HTTP0_9 | Protocol::HTTP1_0 | Protocol::HTTP1_1 => {
+            let socket = addr.to_socket_addrs().ok()?.next()?;
+            let stream = TcpStream::connect_timeout(&socket, Duration::from_secs(5)).ok()?;
+            let _ = stream.set_nodelay(true);
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+            Some(stream)
+        } _ => None,
     }}
 }
 
@@ -66,7 +73,7 @@ pub fn complete(&mut self){self.is_complete = true;}
 
 impl RequestEncodable for Header {
     fn encode(&self) -> String {
-        format!("{}: {}\n", self.name, self.value)
+        format!("{}: {}\r\n", self.name, self.value)
     }
 }
 
@@ -81,21 +88,29 @@ pub struct Req {
 impl RequestEncodable for Req {
     fn encode(&self) -> String {
         let mut req = String::new();
-        match self.protocol { Protocol::HTTP0_9 => {return format!("{} {}\r\n\r\n", self.method, self.requesttarget);} _ => {
-            req.push_str(format!("{} {} {}\r\n", self.method, self.requesttarget, self.protocol.encode()).as_str(),);
-            for header in self.headers.iter() {
-                req.push_str(header.encode().as_str());
+        match self.protocol {
+            Protocol::HTTP0_9 => {
+                return format!("{} {}\r\n\r\n", self.method, self.requesttarget);
             }
-        }  
-    } 
-
-        if self.body.is_some() {
-            let body = self.body.as_ref().unwrap();
-        if req.ends_with("\r\n") {
-            req = req.strip_suffix("\r\n").unwrap().to_string();
+            _ => {
+                req.push_str(
+                    format!(
+                        "{} {} {}\r\n",
+                        self.method,
+                        self.requesttarget,
+                        self.protocol.encode()
+                    )
+                    .as_str(),
+                );
+                for header in self.headers.iter() {
+                    req.push_str(header.encode().as_str());
+                }
+            }
         }
-        req.push_str("\r\n\r\n");
-        req.push_str(body);
+
+        req.push_str("\r\n");
+        if let Some(body) = &self.body {
+            req.push_str(body);
         }
         req
     }
@@ -128,31 +143,41 @@ impl Req {
 
         match self.protocol {
             Protocol::HTTP0_9 => {
-                let mut stream = client.connection.as_ref().unwrap();
-                _ = stream.write(self.encode().as_bytes());
+                let mut stream = match client.connection.as_ref() {
+                    Some(c) => c,
+                    None => return Err(ReqIntegrityError { kind: ReqIntegrityErrorType::BadHeaders, message: "No connection".to_string() }),
+                };
+                if stream.write(self.encode().as_bytes()).is_err() {
+                    return Err(ReqIntegrityError { kind: ReqIntegrityErrorType::BadHeaders, message: "Write failed".to_string() });
+                }
                 let mut response = Response::new(Protocol::HTTP0_9);
                 loop {
                     let mut chunk = [0; CHUNKLEN];
-                    let bytesread = stream.read(&mut chunk).unwrap();
-                    if bytesread == 0 {
-                        break;
+                    match stream.read(&mut chunk) {
+                        Ok(0) => break,
+                        Ok(bytesread) => response.decode_body_chunk(&chunk[..bytesread]),
+                        Err(_) => break,
                     }
-                    response.decode_body_chunk(&chunk);
                 }
                 response.rmzero();
                 Ok(response)
             }
             Protocol::HTTP1_0 | Protocol::HTTP1_1 => {
-                let mut stream = client.connection.as_ref().unwrap();
-                _ = stream.write(self.encode().as_bytes());
+                let mut stream = match client.connection.as_ref() {
+                    Some(c) => c,
+                    None => return Err(ReqIntegrityError { kind: ReqIntegrityErrorType::BadHeaders, message: "No connection".to_string() }),
+                };
+                if stream.write(self.encode().as_bytes()).is_err() {
+                    return Err(ReqIntegrityError { kind: ReqIntegrityErrorType::BadHeaders, message: "Write failed".to_string() });
+                }
                 let mut responsedec = ResDec::new();
                 loop {
                     let mut resp: [u8; 512] = [0; 512];
-                    let bytesread = stream.read(&mut resp).unwrap();
-                    if bytesread == 0 {
-                        break;
+                    match stream.read(&mut resp) {
+                        Ok(0) => break,
+                        Ok(bytesread) => responsedec.decode(&resp[..bytesread]),
+                        Err(_) => break,
                     }
-                    responsedec.decode(&resp[..bytesread]);
                 }
                 Ok(responsedec.response)
             }
@@ -262,9 +287,9 @@ impl Client {
     pub fn new(prefers: Protocol, permissive: bool) -> Self{Self{preferredprot: Some(prefers),tolerant: permissive,..Default::default()}}
     pub fn connect_to(&mut self,addr: String) {
         self.addr = Some(addr.clone());
-        match &self.preferredprot {Some(proto)=>{self.connection = proto.connect(addr);} None=>{
+        match &self.preferredprot {Some(proto)=>{self.connection = proto.connect(&addr);} None=>{
             self.preferredprot = Some(Protocol::HTTP1_1);
-            self.connection = self.preferredprot.as_ref().unwrap().connect(addr);
+            self.connection = self.preferredprot.as_ref().unwrap().connect(&addr);
         }}
     }
 
