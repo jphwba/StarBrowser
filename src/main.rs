@@ -302,29 +302,43 @@ impl ApplicationHandler<State> for App {
 }
 
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let target_url = args.get(1).cloned().unwrap_or_else(|| "http://httpbin.org/get".to_string());
+
     let display_text = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> String {
         let mut client = client::Client::new(Protocol::HTTP1_1, true);
-        client.connect_to("127.0.0.1:8000".to_string());
-        let res = client.send_request(client::Req {
-            method: String::from("GET"),
-            requesttarget: String::from("/"),
-            protocol: client::Protocol::HTTP1_1,
+        
+        client.connect_to(target_url.clone());
+        
+    let host_only = target_url
+        .trim_start_matches("http://")
+        .trim_start_matches("https://")
+        .split('/')
+        .next()
+        .unwrap_or(&target_url);
+
+    let res = client.send_request(client::Req {
+        method: String::from("GET"),
+        requesttarget: String::from("/get"),
+        protocol: client::Protocol::HTTP1_1,
         headers: vec![
-            client::Header::new(
-                String::from("User Agent"),
-                String::from("Star Browser"),
-            ),
-            client::Header::new(
-                String::from("Connection"),
-                String::from("close"),
-            ),
+            client::Header::new(String::from("Host"), host_only.to_string()),
+            client::Header::new(String::from("User-Agent"), String::from("Star Browser")),
+            client::Header::new(String::from("Connection"), String::from("close")),
         ],
-            body: None,
-        });
+        body: None,
+    });
+
         match res {
             Some(response) => {
                 let status = response.status_code.unwrap_or(0);
-                format!("Status: {}", status)
+                let reason = response.reason.as_deref().unwrap_or("OK");
+                let body = response.body.as_deref().unwrap_or("[Empty Body]");
+
+                format!(
+                    "HTTP/1.1 {} {}\n\n{}",
+                    status, reason, body
+                )
             }
             None => "No response".to_string(),
         }

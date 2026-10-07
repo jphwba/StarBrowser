@@ -1,4 +1,4 @@
-use std::io::{Read, Write, BufReader};
+use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 use std::fmt;
@@ -6,12 +6,10 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
-use std::fs::File;
 use rustls::RootCertStore;
 use rustls_pki_types::ServerName;
 use trust_dns_resolver::Resolver;
 use rustls_native_certs;
-use rustls_pemfile;
 
 trait Connection: Read + Write + Send {}
 impl<T: Read + Write + Send> Connection for T {}
@@ -608,6 +606,7 @@ impl Client {
         let mut host = addr.to_string();
         let mut port = 80u16;
 
+        // Strip scheme
         if host.starts_with("https://") {
             use_tls = true;
             port = 443;
@@ -616,6 +615,11 @@ impl Client {
             host = host.strip_prefix("http://").unwrap().to_string();
         }
 
+        if let Some(idx) = host.find('/') {
+            host = host[..idx].to_string();
+        }
+
+        // Parse host and port
         if let Some(idx) = host.find(':') {
             let (host_part, port_part) = host.split_at(idx);
             let host_str = host_part.to_string();
@@ -623,11 +627,8 @@ impl Client {
                 port = p;
             }
             (host_str, port, use_tls)
-        } else if use_tls && port == 80 {
-            port = 443;
+        } else {
             (host, port, use_tls)
-        } else{
-        (host, port, use_tls)
         }
     }
 
@@ -640,7 +641,10 @@ impl Client {
                     self.dns_cache.insert(host.to_string(), addrs.clone());
                     addrs
                 }
-                Err(_) => return None,
+                Err(e) => {
+                    eprintln!("DNS resolution failed for {}: {}", host, e);
+                    return None;
+                }
             }
         };
 
@@ -650,10 +654,15 @@ impl Client {
                     return Some(Box::new(tls_stream));
                 }
             } else {
-                if let Ok(stream) = TcpStream::connect_timeout(&addr, Duration::from_secs(5)) {
-                    let _ = stream.set_nodelay(true);
-                    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
-                    return Some(Box::new(stream));
+                match TcpStream::connect_timeout(&addr, Duration::from_secs(5)) {
+                    Ok(stream) => {
+                        let _ = stream.set_nodelay(true);
+                        let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+                        return Some(Box::new(stream));
+                    }
+                    Err(err) => {
+                        eprintln!("Failed to connect to {}: {}", addr, err);
+                    }
                 }
             }
         }
@@ -684,10 +693,8 @@ impl Client {
         let stream = TcpStream::connect_timeout(&socket, Duration::from_secs(5)).ok()?;
         let mut root_store = RootCertStore::empty();
 
-        if let Ok(file) = File::open("ca-certificates.crt") {
-            let mut reader = BufReader::new(file);
-            let certs = rustls_pemfile::certs(&mut reader);
-            for cert in certs.flatten() {
+        if let Ok(certs) = rustls_native_certs::load_native_certs() {
+            for cert in certs {
                 let _ = root_store.add(cert);
             }
         }
